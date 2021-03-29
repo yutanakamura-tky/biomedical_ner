@@ -21,6 +21,7 @@ torchvision = "^0.9.1"
 torchtext = "^0.9.1"
 allennlp = "^2.2.0"
 bs4 = "^0.0.1"
+lxml = "^4.6.3"
 
 [tool.poetry.dev-dependencies]
 black = "^20.8b1"
