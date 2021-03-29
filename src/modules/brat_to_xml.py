@@ -1,3 +1,5 @@
+# This script can be executed from anywhere.
+
 import dataclasses
 import pathlib
 import re
