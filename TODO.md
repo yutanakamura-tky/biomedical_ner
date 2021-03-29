@@ -1,2 +1,2 @@
 - Split BC5CDR corpus train/dev data into disease name & chem
-- Convert BRAT style -> XML for both NCBI & BC5CDR
+- test for brat_to_xml.py
