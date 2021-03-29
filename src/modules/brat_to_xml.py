@@ -1,3 +1,5 @@
+# This script can be executed from anywhere.
+
 import dataclasses
 import pathlib
 import re
@@ -109,7 +111,7 @@ def convert_text_to_document_obj(document: str) -> Document:
 
 
 def compose_xml(documents: List[Document]) -> str:
-    header = "<xml version='1.0' encoding='UTF-8'?>\n<dataset>\n"
+    header = '<xml version="1.0" encoding="UTF-8"?>\n<dataset>\n'
     footer = "</dataset>"
     xml_text = header
 
