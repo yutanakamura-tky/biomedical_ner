@@ -1,5 +1,5 @@
 [tool.poetry]
-name = ""
+name = "biomedical_ner"
 version = "0.1.0"
 description = ""
 authors = ["yutanakamura-tky <yutanakamura.tky@gmail.com>"]
