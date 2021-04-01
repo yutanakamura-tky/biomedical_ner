@@ -27,7 +27,7 @@ def main():
 
 def convert_brat_txt_to_xml_text(input_path: str) -> str:
     """
-    Convert NER annotation in Brat style into XML
+    Opens convert NER annotation in Brat style and convert it into XML text
     Input file must satisfy the following:
 
         1. Starts with zero or one brank line
@@ -42,7 +42,7 @@ def convert_brat_txt_to_xml_text(input_path: str) -> str:
     """
     with open(input_path) as f:
         print(f"Opening {input_path} ...")
-        lines = clean_txt_file(f.readlines())
+        lines = clean_brat_txt(f.readlines())
 
     # split records (separated with a brank line)
     raw_documents = "".join(lines).split("\n\n")
@@ -53,7 +53,7 @@ def convert_brat_txt_to_xml_text(input_path: str) -> str:
     return xml_text
 
 
-def clean_txt_file(lines: List[str]) -> List[str]:
+def clean_brat_txt(lines: List[str]) -> List[str]:
     # If a file starts with a brank line, remove it
     lines = lines[1:] if lines[0] == "\n" else lines
 
@@ -126,18 +126,21 @@ def convert_text_to_document_obj(document: str) -> Document:
 
 
 def compose_xml(documents: List[Document]) -> str:
-    header = f'<xml version="1.0" encoding="UTF-8"?>\n<dataset n_documents="{len(documents)}">\n'
-    footer = "</dataset>"
-    xml_text = header
+    xml_texts = []
+    n_entity = []
 
     for document in tqdm(documents):
-        xml_text += compose_document_tag(document)
+        xml_texts.append(compose_xml_document_tag(document))
+        n_entity.append(count_entities(document))
 
-    xml_text += footer
+    header = f'<xml version="1.0" encoding="UTF-8"?>\n<dataset n_documents="{len(documents)}" n_entity="{sum(n_entity)}">\n'
+    footer = "</dataset>"
+    xml_text = header + "".join(xml_texts) + footer
+
     return xml_text
 
 
-def compose_document_tag(document: Document) -> str:
+def compose_xml_document_tag(document: Document) -> str:
     disease_tags = {}
     for entity in document.entities:
         if entity.start not in disease_tags.keys():
@@ -157,7 +160,7 @@ def compose_document_tag(document: Document) -> str:
         else:
             disease_tags[entity.end]["closing_tags"].append(entity.closing_tag)
 
-    header = f'<document id="{document.pmid}">\n'
+    header = f'<document id="{document.pmid}" n_entity="{count_entities(document)}">\n'
     footer = "\n</document>\n"
 
     xml_text = header
@@ -201,6 +204,10 @@ def compose_document_tag(document: Document) -> str:
         xml_text += convert_letters(document.content[i])
     xml_text += footer
     return xml_text
+
+
+def count_entities(document: Document) -> int:
+    return len(document.entities)
 
 
 def convert_letters(letter: str) -> str:
