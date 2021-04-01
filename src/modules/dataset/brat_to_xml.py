@@ -9,18 +9,26 @@ from tqdm import tqdm
 
 
 def main():
-    # 'modules' dir
+    # 'dataset' dir
     BASE_DIR = pathlib.Path(__file__).resolve().parent
-    REPO_DIR = (BASE_DIR / "../../..").resolve()
-    CORPUS_DIR = REPO_DIR / "corpus"
-    NCBI_DIR = CORPUS_DIR / "ncbi_disease_corpus"
 
-    convert_brat_txt_to_xml(NCBI_DIR / "NCBItrainset_corpus.txt")
-    convert_brat_txt_to_xml(NCBI_DIR / "NCBIdevelopset_corpus.txt")
-    convert_brat_txt_to_xml(NCBI_DIR / "NCBItestset_corpus.txt")
+    for corpus_name in ["train", "develop", "test"]:
+        REPO_DIR = (BASE_DIR / "../../..").resolve()
+        CORPUS_DIR = REPO_DIR / "corpus"
+        NCBI_DIR = CORPUS_DIR / "ncbi_disease_corpus"
+        input_path = NCBI_DIR / f"NCBI{corpus_name}set_corpus.txt"
+        output_path = pathlib.Path(input_path).with_suffix(".xml")
+
+        xml_text = convert_brat_txt_to_xml_text(input_path)
+        with open(output_path, "w") as f:
+            f.write(xml_text)
+        print(f"XML written to {output_path}")
 
 
-def convert_brat_txt_to_xml(input_path: str):
+def convert_brat_txt_to_xml_text(input_path: str) -> str:
+    """
+    Convert NER annotated documents in Brat style into XML
+    """
     with open(input_path) as f:
         print(f"Opening {input_path} ...")
         lines = clean_txt_file(f.readlines())
@@ -30,12 +38,8 @@ def convert_brat_txt_to_xml(input_path: str):
 
     documents = [convert_text_to_document_obj(doc) for doc in tqdm(raw_documents)]
     xml_text = compose_xml(documents)
-    output_path = pathlib.Path(input_path).with_suffix(".xml")
 
-    with open(output_path, "w") as f:
-        f.write(xml_text)
-
-    print(f"XML written to {output_path}")
+    return xml_text
 
 
 def clean_txt_file(lines: List[str]) -> List[str]:
