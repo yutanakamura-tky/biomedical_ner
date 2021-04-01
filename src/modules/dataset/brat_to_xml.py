@@ -27,7 +27,18 @@ def main():
 
 def convert_brat_txt_to_xml_text(input_path: str) -> str:
     """
-    Convert NER annotated documents in Brat style into XML
+    Convert NER annotation in Brat style into XML
+    Input file must satisfy the following:
+
+        1. Starts with zero or one brank line
+        2. Starts with zero or one brank line
+        3. Documents are separated with a brank line
+        4. The first line of each document is like below:
+            f"{ID}|t|{TEXT}"
+        5. The second line of each document is like below:
+            f"{ID}|a|{TEXT}"
+        6. The rest lines of each document are like below:
+            f"{ID}\t{BEGIN_POSITION}\t{END_POSITION}\t{ENTITY}\t{ENTITY_TYPE}\t{MESH_TAG}"
     """
     with open(input_path) as f:
         print(f"Opening {input_path} ...")
