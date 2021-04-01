@@ -11,7 +11,7 @@ from tqdm import tqdm
 def main():
     # 'modules' dir
     BASE_DIR = pathlib.Path(__file__).resolve().parent
-    REPO_DIR = (BASE_DIR / "../..").resolve()
+    REPO_DIR = (BASE_DIR / "../../..").resolve()
     CORPUS_DIR = REPO_DIR / "corpus"
     NCBI_DIR = CORPUS_DIR / "ncbi_disease_corpus"
 
