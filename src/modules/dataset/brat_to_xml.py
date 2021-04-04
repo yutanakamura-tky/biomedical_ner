@@ -7,22 +7,67 @@ from typing import List
 
 from tqdm import tqdm
 
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+REPO_DIR = (BASE_DIR / "../../..").resolve()
+CORPUS_DIR = REPO_DIR / "corpus"
+
 
 def main():
     # 'dataset' dir
-    BASE_DIR = pathlib.Path(__file__).resolve().parent
+    convert_ncbi_disease_corpus()
+    convert_bc5cdr_corpus()
 
+
+def convert_ncbi_disease_corpus():
     for corpus_name in ["train", "develop", "test"]:
-        REPO_DIR = (BASE_DIR / "../../..").resolve()
-        CORPUS_DIR = REPO_DIR / "corpus"
         NCBI_DIR = CORPUS_DIR / "ncbi_disease_corpus"
         input_path = NCBI_DIR / f"NCBI{corpus_name}set_corpus.txt"
-        output_path = pathlib.Path(input_path).with_suffix(".xml")
+        output_path = NCBI_DIR / f"{corpus_name}.xml"
 
-        xml_text = BratToXmlConverter.convert_brat_txt_to_xml_text(input_path)
+        with open(input_path) as f:
+            brat_text = f.read()
+
+        xml_text = BratToXmlConverter.convert_brat_text_to_xml_text(brat_text)
         with open(output_path, "w") as f:
             f.write(xml_text)
         print(f"XML written to {output_path}")
+
+
+def convert_bc5cdr_corpus():
+    corpus_name_mapping = {
+        "Training": "train",
+        "Development": "develop",
+        "Test": "test",
+    }
+
+    for in_name, out_name in corpus_name_mapping.items():
+        BC5CDR_DIR = CORPUS_DIR / "bc5cdr"
+        input_path = BC5CDR_DIR / f"CDR_{in_name}Set.PubTator.txt"
+        output_path_disease = BC5CDR_DIR / f"disease_{out_name}.xml"
+        output_path_chemical = BC5CDR_DIR / f"chemical_{out_name}.xml"
+
+        with open(input_path) as f:
+            brat_text = f.read()
+
+        regexp_disease_entity = r"(\d+\t){3}.+?\tDisease\tD\d+\n"
+        regexp_chemical_entity = r"(\d+\t){3}.+?\tChemical\tD\d+\n"
+        brat_text_disease = re.sub(regexp_chemical_entity, "", brat_text)
+        brat_text_chemical = re.sub(regexp_disease_entity, "", brat_text)
+
+        xml_text_disease = BratToXmlConverter.convert_brat_text_to_xml_text(
+            brat_text_disease
+        )
+        xml_text_chemical = BratToXmlConverter.convert_brat_text_to_xml_text(
+            brat_text_chemical
+        )
+
+        with open(output_path_disease, "w") as f:
+            f.write(xml_text_disease)
+        print(f"XML written to {output_path_disease}")
+
+        with open(output_path_chemical, "w") as f:
+            f.write(xml_text_chemical)
+        print(f"XML written to {output_path_chemical}")
 
 
 @dataclasses.dataclass
@@ -51,7 +96,7 @@ class Document:
 
 class BratToXmlConverter:
     @classmethod
-    def convert_brat_txt_to_xml_text(cls, input_path: str) -> str:
+    def convert_brat_text_to_xml_text(cls, text: str) -> str:
         """
         Opens convert NER annotation in Brat style and convert it into XML text
         Input file must satisfy the following:
@@ -66,12 +111,12 @@ class BratToXmlConverter:
             6. The rest lines of each document are like below:
                 f"{ID}\t{BEGIN_POSITION}\t{END_POSITION}\t{ENTITY}\t{ENTITY_TYPE}\t{MESH_TAG}"
         """
-        with open(input_path) as f:
-            print(f"Opening {input_path} ...")
-            lines = cls.clean_brat_txt(f.readlines())
+        # If the Brat text file starts with brank lines, remove them
+        # If the Brat text file ends with brank lines, remove them
+        text = text.strip()
 
         # split records (separated with a brank line)
-        raw_documents = "".join(lines).split("\n\n")
+        raw_documents = text.split("\n\n")
 
         documents = [
             cls.convert_text_to_document_obj(doc) for doc in tqdm(raw_documents)
@@ -79,16 +124,6 @@ class BratToXmlConverter:
         xml_text = cls.compose_xml(documents)
 
         return xml_text
-
-    @staticmethod
-    def clean_brat_txt(lines: List[str]) -> List[str]:
-        # If a file starts with a brank line, remove it
-        lines = lines[1:] if lines[0] == "\n" else lines
-
-        # If a file ends with a brank line, remove it
-        lines = lines[:-1] if lines[-1] == "\n" else lines
-
-        return lines
 
     @staticmethod
     def convert_text_to_document_obj(document: str) -> Document:
@@ -121,7 +156,7 @@ class BratToXmlConverter:
                 )
                 annotations.append(entity)
             else:
-                # Skip lines without entity in BC5CDR corpus
+                # Skip lines for relation extraction labels in BC5CDR corpus
                 # e.g., '12345678 CID Dxxxxxx Dyyyyyy ...'
                 continue
 
