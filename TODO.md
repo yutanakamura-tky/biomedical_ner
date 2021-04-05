@@ -1,2 +1,2 @@
 - Split BC5CDR corpus train/dev data into disease name & chem
-- test for brat_to_xml.py
+- XML -> ebmnlp format

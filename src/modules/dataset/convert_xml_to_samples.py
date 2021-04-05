@@ -1,6 +1,8 @@
 import argparse
+import copy
 import itertools
 import os
+import pathlib
 from typing import List
 
 import bs4
@@ -13,94 +15,32 @@ from nltk.tokenize import word_tokenize
 
 def main():
     args = get_args()
+    input_path = pathlib.Path(args.input_path)
+    out_dir = pathlib.Path(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
 
     # 1. Load files
-    # 1-1. XML file WITHOUT medication (<m\> ~ </m\>) tagging
-    with open(args.input_path) as f:
-        bs_notag = bs4.BeautifulSoup(f, features="html.parser")
+    # 1-1. XML file WITH tagging
+    with open(input_path) as f:
+        soup = bs4.BeautifulSoup(f, "xml")
 
-    # 1-2. XML file WITH medication (<m\> ~ </m\>) tagging
-    with open("../real_and_artificial_ner_dataset.xml") as f:
-        bs = bs4.BeautifulSoup(f, features="html.parser")
+    # 1-2. XML file WITHOUT medication tagging
+    # CAUTION: this cannot process overlapping tags
+    soup_notag = remove_tags(copy.copy(soup))
 
-    # 2. Split record indices for 5-fold cross validation
-    records_a_notag = bs_notag.select('document[artificial="1"]')
-    records_a = bs.select('document[artificial="1"]')
-    records_h_notag = bs_notag.select('document[artificial="0"]')
-    records_h = bs.select('document[artificial="0"]')
-
-    # 3-1. Artificial corpus
-
-    for record_a, record_a_notag in zip(records_a, records_a_notag):
-        save_dir = "../data/artificial"
-        write_to_data(record_a_notag, record_a, save_dir)
-
-    # 3-2. Hospital corpus
-
-    for record_h, record_h_notag in zip(records_h, records_h_notag):
-        save_dir = "../data/real"
-        write_to_data(record_h_notag, record_h, save_dir)
+    for record_notag, record in zip(
+        soup_notag.select("document"), soup.select("document")
+    ):
+        write_to_data(record_notag, record, out_dir)
 
 
-def preprocessing(text: str) -> str:
-    result = text.replace("&gt;", ">")
-    result = result.replace("&lt;", "<")
-    result = result.replace("&quot;", '"')
-    result = result.replace("&apos;", "'")
-    return result
-
-
-def tokenize(text: str) -> List[str]:
-    return word_tokenize(preprocessing(text))
-
-
-# 0-2. Function to convert XML into IOB tagging format
-
-
-def xml_to_iob(tagged_record: bs4.element.Tag) -> str:
-    """
-    input
-    -----
-    tagged_record (bs4.element.Tag):
-        An XML record with NER tag.
-
-        Example.
-            Let the XML file be an XML file like below and
-            suppose that the content of <TEXT> have some named entities tagged with <ENTITY>:
-            Then, pass bs4.element.Tag object corresponding to <TEXT> tag to this function.
-
-                <ROOT>
-                    <TEXT> ... <ENTITY> ... </ENTITY> ... </TEXT>
-                        ...
-                    <TEXT> ... <ENTITY> ... </ENTITY> ... </TEXT>
-                </ROOT>
-
-
-    output
-    ------
-    result (str): IOB tagging for each token of the text in the record.
-            Example.
-
-    """
-    parts = tagged_record.contents
-    iob = []
-
-    for part in parts:
-        if type(part) is bs4.element.Tag:
-            # if the part is in tag
-            length = len(tokenize(part.contents[0]))
-            iob += ["B"]
-            iob += ["I"] * (length - 1)
-
-        elif type(part) is bs4.element.NavigableString:
-            # if the part is out of tag
-            length = len(tokenize(part))
-            iob += ["O"] * length
-
-    return iob
-
-
-# 0-3. Function to write data down to files
+def remove_tags(soup: bs4.BeautifulSoup) -> bs4.BeautifulSoup:
+    for doc in soup.select("document"):
+        for content in doc.contents:
+            if type(content) is bs4.element.Tag:
+                if content.name != "document":
+                    content.unwrap()
+    return soup
 
 
 def write_to_data(
@@ -195,9 +135,65 @@ def write_to_data(
         print(f"Wrote IOB tag to {str(save_dir)}/{file_name_prefix}.ann")
 
 
+def preprocessing(text: str) -> str:
+    result = text.replace("&gt;", ">")
+    result = result.replace("&lt;", "<")
+    result = result.replace("&quot;", '"')
+    result = result.replace("&apos;", "'")
+    return result
+
+
+def tokenize(text: str) -> List[str]:
+    return word_tokenize(preprocessing(text))
+
+
+def xml_to_iob(tagged_record: bs4.element.Tag) -> str:
+    """
+    input
+    -----
+    tagged_record (bs4.element.Tag):
+        An XML record with NER tag.
+
+        Example.
+            Let the XML file be an XML file like below and
+            suppose that the content of <TEXT> have some named entities tagged with <ENTITY>:
+            Then, pass bs4.element.Tag object corresponding to <TEXT> tag to this function.
+
+                <ROOT>
+                    <TEXT> ... <ENTITY> ... </ENTITY> ... </TEXT>
+                        ...
+                    <TEXT> ... <ENTITY> ... </ENTITY> ... </TEXT>
+                </ROOT>
+
+
+    output
+    ------
+    result (str): IOB tagging for each token of the text in the record.
+            Example.
+
+    """
+    parts = tagged_record.contents
+    iob = []
+
+    for part in parts:
+        if type(part) is bs4.element.Tag:
+            # if the part is in tag
+            length = len(tokenize(part.contents[0]))
+            iob += ["B"]
+            iob += ["I"] * (length - 1)
+
+        elif type(part) is bs4.element.NavigableString:
+            # if the part is out of tag
+            length = len(tokenize(part))
+            iob += ["O"] * length
+
+    return iob
+
+
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_path", dest="input_path", type=str)
+    parser.add_argument("input_path", type=str)
+    parser.add_argument("out_dir", type=str)
     args = parser.parse_args()
     return args
 
