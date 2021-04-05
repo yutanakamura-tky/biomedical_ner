@@ -44,8 +44,7 @@ def main():
     }
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=f"{MODEL_CHECK_POINT_PATH[config.model]}",
-        filename=f"{config.version}.ckpt",
+        filepath=f"{MODEL_CHECK_POINT_PATH[config.model]}/{config.version}.ckpt",
     )
 
     trainer = pl.Trainer(
