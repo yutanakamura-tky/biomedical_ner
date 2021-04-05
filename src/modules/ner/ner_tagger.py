@@ -27,7 +27,7 @@ import subprocess
 from glob import glob
 from logging import DEBUG, INFO, FileHandler, Formatter, StreamHandler, getLogger
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -129,7 +129,7 @@ class NERDataset(torch.utils.data.Dataset):
         self.ltoi = {v: k for k, v in self.itol.items()}
 
     @classmethod
-    def from_dirname(cls, dirnames: List[str]):
+    def from_dirnames(cls, dirnames: List[str]):
         """
         requirements:
             Data must be in the format below:
@@ -242,14 +242,12 @@ class NERTagger(pl.LightningModule):
 
         elif self.hparams.model == "biobert":
             # Load Pretrained BioBERT
-            DIR_BioBERT = Path(str(self.hparams.biobert_dir))
-            self.bertconfig = BertConfig.from_pretrained("bert-base-cased")
+            PATH_BioBERT = Path(str(self.hparams.biobert_path))
+            self.bertconfig = BertConfig.from_pretrained(self.hparams.bert_model_type)
             self.bertforpretraining = BertForPreTraining(self.bertconfig)
-            self.bertforpretraining.load_tf_weights(
-                self.bertconfig, DIR_BioBERT / "model.ckpt-1000000"
-            )
+            self.bertforpretraining.load_tf_weights(self.bertconfig, PATH_BioBERT)
             self.biobert = self.bertforpretraining.bert
-            self.tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+            self.tokenizer = BertTokenizer.from_pretrained(self.hparams.bert_model_type)
 
             # Freeze BioBERT if fine-tune not desired
             if not self.hparams.fine_tune_biobert:
@@ -304,7 +302,9 @@ class NERTagger(pl.LightningModule):
 
         return (hidden, crf_mask)
 
-    def _forward_biobert(self, tokens):
+    def _forward_biobert(
+        self, tokens: List[List[str]]
+    ) -> Tuple[torch.tensor, torch.tensor]:
         """
         Return BioBERT Hidden state for the tokenized documents.
         Documents with different lengths will be accepted.
@@ -351,27 +351,40 @@ class NERTagger(pl.LightningModule):
 
         # Split each document into chunks shorter than max_length.
         # Here, each document will be simply split at every 510 tokens.
+
+        max_length = min(
+            self.bertconfig.max_position_embeddings, self.hparams.max_length
+        )
+
         longest_length = max([len(doc) for doc in subwords])
-        n_chunks = (longest_length - 1) // (self.tokenizer.max_len - 2) + 1
+        n_chunks = (longest_length - 1) // (max_length - 2) + 1
         chunks = []
         for n in range(n_chunks):
-            chunks.append(
-                [
-                    doc[
-                        (self.tokenizer.max_len - 2)
-                        * n : (self.tokenizer.max_len - 2)
-                        * (n + 1)
-                    ]
-                    for doc in subwords
+            chunk_of_all_documents = []
+            for document in subwords:
+                chunk_of_single_document = document[
+                    (max_length - 2) * n : (max_length - 2) * (n + 1)
                 ]
-            )
+                if chunk_of_single_document == []:
+                    chunk_of_all_documents.append([""])
+                else:
+                    chunk_of_all_documents.append(chunk_of_single_document)
+            chunks.append(chunk_of_all_documents)
 
         # Convert chunks into BERT input form.
         inputs = []
         for chunk in chunks:
+            if type(chunk) is str:
+                unsqueezed_chunk = [[chunk]]
+            elif type(chunk) is list:
+                if type(chunk[0]) is str:
+                    unsqueezed_chunk = [chunk]
+                elif type(chunk[0]) is list:
+                    unsqueezed_chunk = chunk
+
             inputs.append(
                 self.tokenizer.batch_encode_plus(
-                    map(lambda x: "" if x == [] else x, chunk),
+                    unsqueezed_chunk,
                     pad_to_max_length=True,
                     is_pretokenized=True,
                 )
@@ -607,17 +620,6 @@ class NERTagger(pl.LightningModule):
         """
         return self.step(batch, batch_nb, *optimizer_idx)
 
-    # def training_step_end(self, outputs):
-    #    """
-    #    outputs(dict) -> loss(dict or OrderedDict)
-    #    # Caution: key must exactly be 'loss'.
-    #    """
-    #    loss = torch.mean(outputs['loss'])
-    #
-    #    progress_bar = {'train_loss':loss}
-    #    returns = {'loss':loss, 'T':outputs['T'], 'Y':outputs['Y'], 'I':outputs['I'], 'progress_bar':progress_bar}
-    #    return returns
-
     def training_epoch_end(self, outputs):
         """
         outputs(list of dict) -> loss(dict or OrderedDict)
@@ -734,21 +736,21 @@ class NERTagger(pl.LightningModule):
                 return optimizer
 
     def train_dataloader(self):
-        ds_train = NERDataset.from_dirname(self.hparams.train_dir)
+        ds_train = NERDataset.from_dirnames(self.hparams.train_dirs)
         dl_train = NERDataLoader(
             ds_train, batch_size=self.hparams.batch_size, shuffle=True
         )
         return dl_train
 
     def val_dataloader(self):
-        ds_val = NERDataset.from_dirname(self.hparams.val_dir)
+        ds_val = NERDataset.from_dirnames(self.hparams.val_dirs)
         dl_val = NERDataLoader(
             ds_val, batch_size=self.hparams.batch_size, shuffle=False
         )
         return dl_val
 
     def test_dataloader(self):
-        ds_test = NERDataset.from_dirname(self.hparams.test_dir)
+        ds_test = NERDataset.from_dirnames(self.hparams.test_dirs)
         dl_test = NERDataLoader(
             ds_test, batch_size=self.hparams.batch_size, shuffle=False
         )
