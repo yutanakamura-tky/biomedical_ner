@@ -44,7 +44,8 @@ def main():
     }
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        filepath=f"{MODEL_CHECK_POINT_PATH[config.model]}/{config.version}.ckpt"
+        dirpath=f"{MODEL_CHECK_POINT_PATH[config.model]}",
+        filename=f"{config.version}.ckpt",
     )
 
     trainer = pl.Trainer(
@@ -106,9 +107,7 @@ def seed_everything(seed=1234):
 
 
 def get_args():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.RawTextHelpFormatter
-    )
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
 
     parser.add_argument(
         "--debug",
@@ -124,7 +123,10 @@ def get_args():
         help="Directories of training dataset",
     )
     parser.add_argument(
-        "--val-dirs", dest="val_dirs", nargs="*", help="Directories of validation dataset"
+        "--val-dirs",
+        dest="val_dirs",
+        nargs="*",
+        help="Directories of validation dataset",
     )
     parser.add_argument(
         "--test-dirs", dest="test_dirs", nargs="*", help="Directories of test dataset"
@@ -182,6 +184,13 @@ def get_args():
         action="store_true",
         dest="fine_tune_bioelmo",
         help="Whether to Fine Tune BioELMo",
+    )
+    parser.add_argument(
+        "--bert-model-type",
+        dest="bert_model_type",
+        type=str,
+        default="bert-base-uncased",
+        help="BERT Model Type to use defined in Transformers",
     )
     parser.add_argument(
         "--lr-bioelmo",

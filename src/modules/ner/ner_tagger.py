@@ -243,13 +243,11 @@ class NERTagger(pl.LightningModule):
         elif self.hparams.model == "biobert":
             # Load Pretrained BioBERT
             PATH_BioBERT = Path(str(self.hparams.biobert_path))
-            self.bertconfig = BertConfig.from_pretrained("bert-base-cased")
+            self.bertconfig = BertConfig.from_pretrained(self.hparams.bert_model_type)
             self.bertforpretraining = BertForPreTraining(self.bertconfig)
-            self.bertforpretraining.load_tf_weights(
-                self.bertconfig, PATH_BioBERT
-            )
+            self.bertforpretraining.load_tf_weights(self.bertconfig, PATH_BioBERT)
             self.biobert = self.bertforpretraining.bert
-            self.tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+            self.tokenizer = BertTokenizer.from_pretrained(self.hparams.bert_model_type)
 
             # Freeze BioBERT if fine-tune not desired
             if not self.hparams.fine_tune_biobert:
