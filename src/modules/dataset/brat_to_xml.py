@@ -205,7 +205,7 @@ class BratToXmlConverter:
 
         xml_text = header
 
-        for i in range(len(document.content)):
+        for i in range(len(document.content) + 1):
             # Add letters to XML text one by one
             if i in disease_tags.keys():
                 # When comming to entity position, add tags to XML text
@@ -241,7 +241,8 @@ class BratToXmlConverter:
                 xml_text += "".join(disease_tags[i]["opening_tags"][::-1])
 
             # Convert letters <, >, ', " to avoid XML parsing errors
-            xml_text += cls.convert_letters(document.content[i])
+            if i < len(document.content):
+                xml_text += cls.convert_letters(document.content[i])
         xml_text += footer
         return xml_text
 

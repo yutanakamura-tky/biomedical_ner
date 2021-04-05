@@ -38,7 +38,8 @@ def remove_tags(soup: bs4.BeautifulSoup) -> bs4.BeautifulSoup:
     for doc in soup.select("document"):
         for content in doc.contents:
             if type(content) is bs4.element.Tag:
-                content.unwrap()
+                if content.name != "document":
+                    content.unwrap()
     return soup
 
 
