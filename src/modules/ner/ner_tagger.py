@@ -27,6 +27,7 @@ import subprocess
 from glob import glob
 from logging import DEBUG, INFO, FileHandler, Formatter, StreamHandler, getLogger
 from pathlib import Path
+from typing import List
 
 import pytorch_lightning as pl
 import torch
@@ -96,87 +97,73 @@ def tag_to_id(tag, ltoi):
     return torch.tensor([int(t) for t in tag.split(",")])
 
 
-# ### 0-4. Prepare File
-
-# Example:
-#   'a0' -> path of artificial dataset fold-0
-#   'h4' -> path of hospital dataset fold-4
-
-CODE_TO_DIR = {
-    f"{dataset[0]}{i}": f"./data/{dataset}/fold{i}"
-    for dataset in ["artificial", "hospital"]
-    for i in range(150)
-}
-
-
-def path_finder(dirs):
-    """
-    list -> tuple
-
-    requirements:
-        Training & test data must be in the format below:
-            - File names:
-                - foo.text: raw text of an XML record without NER tagging.
-                - foo.tokens: a tokenized XML record without NER tagging.
-                - foo.ann: IOB tagging of the record (e.g. O,O,O,B,I,O,O,...)
-
-    inputs:
-        dirs (list(str)): List of directories of data.
-    outputs:
-        paths (tuple): Tuple containing paths of text, token & tag files.
-    """
-
-    text_paths = sorted(list(itertools.chain(*[glob(d + "/*.text") for d in dirs])))
-    token_paths = sorted(list(itertools.chain(*[glob(d + "/*.tokens") for d in dirs])))
-    tag_paths = sorted(list(itertools.chain(*[glob(d + "/*.ann") for d in dirs])))
-
-    paths = (text_paths, token_paths, tag_paths)
-
-    return paths
-
-
 # ### 1. Dataset, DataLoader
 
 
 class NERDataset(torch.utils.data.Dataset):
-    def __init__(self, text_files, token_files, tag_files):
+    def __init__(
+        self,
+        text_file_paths: List[str],
+        token_file_paths: List[str],
+        tag_file_paths: List[str],
+    ):
         """
-        text_files: list(str)
-        token_files: list(str)
-        tag_files: list(str)
+        text_file_paths: list(str)
+        token_file_paths: list(str)
+        tag_file_paths: list(str)
         """
-        self.text_files = text_files
-        self.token_files = token_files
+        self.text_file_paths = text_file_paths
+        self.token_file_paths = token_file_paths
+        self.tag_file_paths = tag_file_paths
         self.ix = [
             int(re.compile(r"/([0-9]+)[^0-9]+").findall(path)[0])
-            for path in self.text_files
+            for path in self.text_file_paths
         ]
-        self.tag_files = tag_files
         assert (
-            len(text_files) == len(token_files) == len(tag_files)
+            len(text_file_paths) == len(token_file_paths) == len(tag_file_paths)
         ), "ERROR: All arguments must be lists of the same size."
-        assert len(text_files) > 0, "ERROR: Passed file lists are empty."
-        self.n = len(text_files)
+        assert len(text_file_paths) > 0, "ERROR: Passed file lists are empty."
+        self.n = len(text_file_paths)
 
         self.itol = ID_TO_LABEL
         self.ltoi = {v: k for k, v in self.itol.items()}
+
+    @classmethod
+    def from_dirname(cls, dirnames: List[str]):
+        """
+        requirements:
+            Data must be in the format below:
+                - foo.text: raw text of an XML record without NER tagging.
+                - foo.tokens: a tokenized XML record without NER tagging.
+                - foo.ann: IOB tagging of the record (e.g. O,O,O,B,I,O,O,...)
+        """
+        text_paths = sorted(
+            list(itertools.chain(*[glob(d + "/*.text") for d in dirnames]))
+        )
+        token_paths = sorted(
+            list(itertools.chain(*[glob(d + "/*.tokens") for d in dirnames]))
+        )
+        tag_paths = sorted(
+            list(itertools.chain(*[glob(d + "/*.ann") for d in dirnames]))
+        )
+        paths = (text_paths, token_paths, tag_paths)
+        return cls(*paths)
 
     def __len__(self):
         return self.n
 
     def __getitem__(self, idx):
         returns = {}
-
         returns["ix"] = self.ix[idx]
 
-        with open(self.text_files[idx]) as f:
+        with open(self.text_file_paths[idx]) as f:
             # Raw document. Example:
             # [Triple therapy regimens involving H2 blockaders for therapy of Helicobacter pylori infections].
             # Comparison of ranitidine and lansoprazole in
             # short-term low-dose triple therapy for Helicobacter pylori infection.
             returns["text"] = f.read()
 
-        with open(self.token_files[idx]) as f:
+        with open(self.token_file_paths[idx]) as f:
             # Tokenized document. Example:
             # ['[', 'Triple', 'therapy', 'regimens', 'involving', 'H2', 'blockaders',
             #  'for', 'therapy', 'of', 'Helicobacter', 'pylori', 'infections', ']', '.',
@@ -186,7 +173,7 @@ class NERDataset(torch.utils.data.Dataset):
             tokens = f.read().split()
             returns["tokens"] = tokens
 
-        with open(self.tag_files[idx]) as f:
+        with open(self.tag_file_paths[idx]) as f:
             # sequence of B,I,O tags
             # e.g., 'O,O,B,I,O,...'
             tag = f.read()
@@ -201,8 +188,8 @@ class NERDataset(torch.utils.data.Dataset):
 class NERDataLoader(torch.utils.data.DataLoader):
     def __init__(self, dataset, **kwargs):
         """
-        text_files: list(str)
-        token_files: list(str)
+        text_file_paths: list(str)
+        token_file_paths: list(str)
         p_files: list(str)
         i_files: list(str)
         o_files: list(str)
@@ -239,12 +226,8 @@ class NERTagger(pl.LightningModule):
         if self.hparams.model == "bioelmo":
             # Load Pretrained BioELMo
             DIR_ELMo = Path(str(self.hparams.bioelmo_dir))
-            self.bioelmo = Elmo(
-                DIR_ELMo / "biomed_elmo_options.json",
-                DIR_ELMo / "biomed_elmo_weights.hdf5",
-                1,
-                requires_grad=bool(self.hparams.fine_tune_bioelmo),
-                dropout=0,
+            self.bioelmo = self.load_bioelmo(
+                DIR_ELMo, not self.hparams.fine_tune_bioelmo
             )
             self.bioelmo_output_dim = self.bioelmo.get_output_dim()
 
@@ -290,6 +273,19 @@ class NERTagger(pl.LightningModule):
             include_start_end_transitions=False,
         )
         self.crf.reset_parameters()
+
+    @staticmethod
+    def load_bioelmo(bioelmo_dir: str, freeze: bool) -> Elmo:
+        # Load Pretrained BioELMo
+        DIR_ELMo = Path(bioelmo_dir)
+        bioelmo = Elmo(
+            DIR_ELMo / "biomed_elmo_options.json",
+            DIR_ELMo / "biomed_elmo_weights.hdf5",
+            1,
+            requires_grad=bool(not freeze),
+            dropout=0,
+        )
+        return bioelmo
 
     def get_device(self):
         return self.crf.state_dict()["transitions"].device
@@ -738,33 +734,21 @@ class NERTagger(pl.LightningModule):
                 return optimizer
 
     def train_dataloader(self):
-        ds_train = NERDataset(
-            *path_finder(
-                list(map(lambda code: CODE_TO_DIR[code], self.hparams.train_dir))
-            )
-        )
+        ds_train = NERDataset.from_dirname(self.hparams.train_dir)
         dl_train = NERDataLoader(
             ds_train, batch_size=self.hparams.batch_size, shuffle=True
         )
         return dl_train
 
     def val_dataloader(self):
-        ds_val = NERDataset(
-            *path_finder(
-                list(map(lambda code: CODE_TO_DIR[code], self.hparams.val_dir))
-            )
-        )
+        ds_val = NERDataset.from_dirname(self.hparams.val_dir)
         dl_val = NERDataLoader(
             ds_val, batch_size=self.hparams.batch_size, shuffle=False
         )
         return dl_val
 
     def test_dataloader(self):
-        ds_test = NERDataset(
-            *path_finder(
-                list(map(lambda code: CODE_TO_DIR[code], self.hparams.test_dir))
-            )
-        )
+        ds_test = NERDataset.from_dirname(self.hparams.test_dir)
         dl_test = NERDataLoader(
             ds_test, batch_size=self.hparams.batch_size, shuffle=False
         )
