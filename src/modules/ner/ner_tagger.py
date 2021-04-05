@@ -129,7 +129,7 @@ class NERDataset(torch.utils.data.Dataset):
         self.ltoi = {v: k for k, v in self.itol.items()}
 
     @classmethod
-    def from_dirname(cls, dirnames: List[str]):
+    def from_dirnames(cls, dirnames: List[str]):
         """
         requirements:
             Data must be in the format below:
@@ -242,11 +242,11 @@ class NERTagger(pl.LightningModule):
 
         elif self.hparams.model == "biobert":
             # Load Pretrained BioBERT
-            DIR_BioBERT = Path(str(self.hparams.biobert_dir))
+            PATH_BioBERT = Path(str(self.hparams.biobert_path))
             self.bertconfig = BertConfig.from_pretrained("bert-base-cased")
             self.bertforpretraining = BertForPreTraining(self.bertconfig)
             self.bertforpretraining.load_tf_weights(
-                self.bertconfig, DIR_BioBERT / "model.ckpt-1000000"
+                self.bertconfig, PATH_BioBERT
             )
             self.biobert = self.bertforpretraining.bert
             self.tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
@@ -734,21 +734,21 @@ class NERTagger(pl.LightningModule):
                 return optimizer
 
     def train_dataloader(self):
-        ds_train = NERDataset.from_dirname(self.hparams.train_dir)
+        ds_train = NERDataset.from_dirnames(self.hparams.train_dirs)
         dl_train = NERDataLoader(
             ds_train, batch_size=self.hparams.batch_size, shuffle=True
         )
         return dl_train
 
     def val_dataloader(self):
-        ds_val = NERDataset.from_dirname(self.hparams.val_dir)
+        ds_val = NERDataset.from_dirnames(self.hparams.val_dirs)
         dl_val = NERDataLoader(
             ds_val, batch_size=self.hparams.batch_size, shuffle=False
         )
         return dl_val
 
     def test_dataloader(self):
-        ds_test = NERDataset.from_dirname(self.hparams.test_dir)
+        ds_test = NERDataset.from_dirnames(self.hparams.test_dirs)
         dl_test = NERDataLoader(
             ds_test, batch_size=self.hparams.batch_size, shuffle=False
         )

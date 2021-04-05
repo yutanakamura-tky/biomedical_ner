@@ -106,22 +106,8 @@ def seed_everything(seed=1234):
 
 
 def get_args():
-    description = """
-    # Train with hospital corpus fold 0,1,2, validate with hospital corpus fold 3 and test with hospital corpus fold 4:
-    python train_ner_tagger.py --train-dir h0 h1 h2 --val-dir h3 --test-dir h4
-
-    # Set max epochs to 30 (default 15)
-    python train_ner_tagger.py --train-dir h0 h1 h2 --val-dir h3 --test-dir h4 --max-epochs 30
-
-    # Fine-tune also BioELMo not only CRF layer
-    python train_ner_tagger.py --train-dir h0 h1 h2 --val-dir h3 --test-dir h4 --fine-tune-bioelmo
-
-    # Debug mode
-    python train_ner_tagger.py --train-dir h0 h1 h2 --val-dir h3 --test-dir h4 --debug
-    """
-
     parser = argparse.ArgumentParser(
-        formatter_class=argparse.RawTextHelpFormatter, description=description
+        formatter_class=argparse.RawTextHelpFormatter
     )
 
     parser.add_argument(
@@ -132,16 +118,16 @@ def get_args():
         help="Set this option for debug mode",
     )
     parser.add_argument(
-        "--train-dir",
-        dest="train_dir",
+        "--train-dirs",
+        dest="train_dirs",
         nargs="*",
         help="Directories of training dataset",
     )
     parser.add_argument(
-        "--val-dir", dest="val_dir", nargs="*", help="Directories of validation dataset"
+        "--val-dirs", dest="val_dirs", nargs="*", help="Directories of validation dataset"
     )
     parser.add_argument(
-        "--test-dir", dest="test_dir", nargs="*", help="Directories of test dataset"
+        "--test-dirs", dest="test_dirs", nargs="*", help="Directories of test dataset"
     )
     parser.add_argument(
         "--model",
@@ -159,8 +145,8 @@ def get_args():
         help="BioELMo Directory",
     )
     parser.add_argument(
-        "--biobert-dir",
-        dest="biobert_dir",
+        "--biobert-path",
+        dest="biobert_path",
         type=str,
         default="./models/biobert/biobert_v1.1_pubmed",
         help="BioBERT Directory",
