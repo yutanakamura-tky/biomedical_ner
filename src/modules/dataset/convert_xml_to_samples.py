@@ -24,27 +24,49 @@ def main():
     with open(input_path) as f:
         soup = bs4.BeautifulSoup(f, "xml")
 
+    if soup.select(f"{args.document_tag_name} {args.document_tag_name}"):
+        raise RuntimeError(
+            f'Tag "{args.document_tag_name}" is overlapping in {input_path}'
+        )
+
     # 1-2. XML file WITHOUT medication tagging
-    # CAUTION: this cannot process overlapping tags
-    soup_notag = remove_tags(copy.copy(soup))
+    soup_notag = remove_inner_tags(
+        copy.copy(soup), document_tag_name=args.document_tag_name
+    )
 
     for record_notag, record in zip(
-        soup_notag.select("document"), soup.select("document")
+        soup_notag.select(args.document_tag_name), soup.select(args.document_tag_name)
     ):
-        write_to_data(record_notag, record, out_dir)
+        write_to_data(
+            record_notag,
+            record,
+            save_dir=out_dir,
+            file_name_prefix=record_notag[args.document_id_attr_name],
+        )
 
 
-def remove_tags(soup: bs4.BeautifulSoup) -> bs4.BeautifulSoup:
-    for doc in soup.select("document"):
-        for content in doc.contents:
-            if type(content) is bs4.element.Tag:
-                if content.name != "document":
-                    content.unwrap()
+def remove_inner_tags(
+    soup: bs4.BeautifulSoup, document_tag_name: str
+) -> bs4.BeautifulSoup:
+    for doc in soup.select(document_tag_name):
+        while True:
+            inner_tags = [
+                content for content in doc.contents if type(content) is bs4.element.Tag
+            ]
+            if not inner_tags:
+                break
+            else:
+                for tag in inner_tags:
+                    if tag.name != document_tag_name:
+                        tag.unwrap()
     return soup
 
 
 def write_to_data(
-    untagged_record: bs4.element.Tag, tagged_record: bs4.element.Tag, save_dir: str
+    untagged_record: bs4.element.Tag,
+    tagged_record: bs4.element.Tag,
+    save_dir: str,
+    file_name_prefix: str,
 ) -> None:
     """
     This function takes a pair of bs4.element.Tag objects of the same XML record as input.
@@ -78,22 +100,7 @@ def write_to_data(
     None
     """
 
-    def apply_tokenization_to_record(record):
-        tokenized_objects = map(
-            lambda obj: tokenize(obj)
-            if type(obj) is bs4.element.NavigableString
-            else tokenize(obj.contents[0]),
-            record.contents,
-        )
-        return list(itertools.chain(*tokenized_objects))
-
-    # Here we suppose the record tags have "id" property and use its value for filename prefix.
-    # <document id="foo">
-    #     ...
-    # </document>
-
-    file_name_prefix = untagged_record["id"]
-    print(f"Processing record ID {file_name_prefix} ...")
+    print(f"Processing record {file_name_prefix} ...")
 
     # Caution:
     #    Do not create tokens_notag by tokenizing untagged record.
@@ -147,6 +154,16 @@ def tokenize(text: str) -> List[str]:
     return word_tokenize(preprocessing(text))
 
 
+def apply_tokenization_to_record(tagged_record: bs4.element.Tag):
+    tokenized_objects = map(
+        lambda obj: tokenize(obj)
+        if type(obj) is bs4.element.NavigableString
+        else tokenize(obj.contents[0]),
+        tagged_record.contents,
+    )
+    return list(itertools.chain(*tokenized_objects))
+
+
 def xml_to_iob(tagged_record: bs4.element.Tag) -> str:
     """
     input
@@ -194,6 +211,12 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=str)
     parser.add_argument("out_dir", type=str)
+    parser.add_argument(
+        "--document-tag", type=str, dest="document_tag_name", default="document"
+    )
+    parser.add_argument(
+        "--document-id-attr", type=str, dest="document_id_attr_name", default="id"
+    )
     args = parser.parse_args()
     return args
 
