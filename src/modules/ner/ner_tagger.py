@@ -20,14 +20,14 @@
 
 # ### 0-1. Dependencies
 
+import glob
 import itertools
+import pathlib
 import re
 import shlex
 import subprocess
-from glob import glob
 from logging import DEBUG, INFO, FileHandler, Formatter, StreamHandler, getLogger
-from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import pytorch_lightning as pl
 import torch
@@ -138,13 +138,25 @@ class NERDataset(torch.utils.data.Dataset):
                 - foo.ann: IOB tagging of the record (e.g. O,O,O,B,I,O,O,...)
         """
         text_paths = sorted(
-            list(itertools.chain(*[glob(d + "/*.text") for d in dirnames]))
+            list(
+                itertools.chain(
+                    *[glob.glob(str(pathlib.Path(d) / "*.text")) for d in dirnames]
+                )
+            )
         )
         token_paths = sorted(
-            list(itertools.chain(*[glob(d + "/*.tokens") for d in dirnames]))
+            list(
+                itertools.chain(
+                    *[glob.glob(str(pathlib.Path(d) / "*.tokens")) for d in dirnames]
+                )
+            )
         )
         tag_paths = sorted(
-            list(itertools.chain(*[glob(d + "/*.ann") for d in dirnames]))
+            list(
+                itertools.chain(
+                    *[glob.glob(str(pathlib.Path(d) / "*.ann")) for d in dirnames]
+                )
+            )
         )
         paths = (text_paths, token_paths, tag_paths)
         return cls(*paths)
@@ -225,7 +237,7 @@ class NERTagger(pl.LightningModule):
 
         if self.hparams.model == "bioelmo":
             # Load Pretrained BioELMo
-            DIR_ELMo = Path(str(self.hparams.bioelmo_dir))
+            DIR_ELMo = pathlib.Path(str(self.hparams.bioelmo_dir))
             self.bioelmo = self.load_bioelmo(
                 DIR_ELMo, not self.hparams.fine_tune_bioelmo
             )
@@ -242,7 +254,7 @@ class NERTagger(pl.LightningModule):
 
         elif self.hparams.model == "biobert":
             # Load Pretrained BioBERT
-            PATH_BioBERT = Path(str(self.hparams.biobert_path))
+            PATH_BioBERT = pathlib.Path(str(self.hparams.biobert_path))
             self.bertconfig = BertConfig.from_pretrained(self.hparams.bert_model_type)
             self.bertforpretraining = BertForPreTraining(self.bertconfig)
             self.bertforpretraining.load_tf_weights(self.bertconfig, PATH_BioBERT)
@@ -275,7 +287,7 @@ class NERTagger(pl.LightningModule):
     @staticmethod
     def load_bioelmo(bioelmo_dir: str, freeze: bool) -> Elmo:
         # Load Pretrained BioELMo
-        DIR_ELMo = Path(bioelmo_dir)
+        DIR_ELMo = pathlib.Path(bioelmo_dir)
         bioelmo = Elmo(
             DIR_ELMo / "biomed_elmo_options.json",
             DIR_ELMo / "biomed_elmo_weights.hdf5",
@@ -288,7 +300,7 @@ class NERTagger(pl.LightningModule):
     def get_device(self):
         return self.crf.state_dict()["transitions"].device
 
-    def _forward_bioelmo(self, tokens):
+    def _forward_bioelmo(self, tokens) -> Tuple[torch.Tensor, torch.Tensor]:
         # character_ids: torch.tensor(n_batch, len_max)
         # documents will be padded to have the same token lengths as the longest document
         character_ids = batch_to_ids(tokens)
@@ -304,7 +316,7 @@ class NERTagger(pl.LightningModule):
 
     def _forward_biobert(
         self, tokens: List[List[str]]
-    ) -> Tuple[torch.tensor, torch.tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Return BioBERT Hidden state for the tokenized documents.
         Documents with different lengths will be accepted.
@@ -432,7 +444,12 @@ class NERTagger(pl.LightningModule):
 
         return (hidden_states_shrunk, crf_mask)
 
-    def _forward_crf(self, hidden, gold_tags_padded, crf_mask):
+    def _forward_crf(
+        self,
+        hidden: torch.Tensor,
+        gold_tags_padded: torch.Tensor,
+        crf_mask: torch.Tensor,
+    ) -> Dict:
         """
         input:
             hidden (torch.tensor) (n_batch, seq_length, hidden_dim)
@@ -445,6 +462,12 @@ class NERTagger(pl.LightningModule):
                 'gold_tags_padded' : torch.tensor
         """
         result = {}
+
+        if not (hidden.size()[1] == gold_tags_padded.size()[1] == crf_mask.size()[1]):
+            raise RuntimeError(
+                "seq_length of hidden, gold_tags_padded, and crf_mask do not match: "
+                + f"{hidden.size()}, {gold_tags_padded.size()}, {crf_mask.size()}"
+            )
 
         if gold_tags_padded is not None:
             # Training Mode
@@ -612,7 +635,7 @@ class NERTagger(pl.LightningModule):
 
         return returns
 
-    def training_step(self, batch, batch_nb, *optimizer_idx):
+    def training_step(self, batch, batch_nb, *optimizer_idx) -> Dict:
         # Process on individual mini-batches
         """
         (batch) -> (dict or OrderedDict)
@@ -620,7 +643,7 @@ class NERTagger(pl.LightningModule):
         """
         return self.step(batch, batch_nb, *optimizer_idx)
 
-    def training_epoch_end(self, outputs):
+    def training_epoch_end(self, outputs: Union[List[Dict], List[List[Dict]]]) -> Dict:
         """
         outputs(list of dict) -> loss(dict or OrderedDict)
         # Caution: key must exactly be 'loss'.
@@ -642,14 +665,16 @@ class NERTagger(pl.LightningModule):
         returns = {"loss": loss, "progress_bar": progress_bar}
         return returns
 
-    def validation_step(self, batch, batch_nb):
+    def validation_step(self, batch, batch_nb) -> Dict:
         # Process on individual mini-batches
         """
         (batch) -> (dict or OrderedDict)
         """
         return self.step(batch, batch_nb)
 
-    def validation_epoch_end(self, outputs):
+    def validation_epoch_end(
+        self, outputs: Union[List[Dict], List[List[Dict]]]
+    ) -> Dict:
         """
         For single dataloader:
             outputs(list of dict) -> (dict or OrderedDict)
@@ -673,14 +698,14 @@ class NERTagger(pl.LightningModule):
         returns = {"val_loss": loss, "progress_bar": progress_bar}
         return returns
 
-    def test_step(self, batch, batch_nb):
+    def test_step(self, batch, batch_nb) -> Dict:
         # Process on individual mini-batches
         """
         (batch) -> (dict or OrderedDict)
         """
         return self.step(batch, batch_nb)
 
-    def test_epoch_end(self, outputs):
+    def test_epoch_end(self, outputs: Union[List[Dict], List[List[Dict]]]) -> Dict:
         """
         For single dataloader:
             outputs(list of dict) -> (dict or OrderedDict)
@@ -702,7 +727,9 @@ class NERTagger(pl.LightningModule):
         returns = {"test_loss": loss, "progress_bar": progress_bar}
         return returns
 
-    def configure_optimizers(self):
+    def configure_optimizers(
+        self,
+    ) -> Union[torch.optim.Optimizer, List[torch.optim.Optimizer]]:
         if self.hparams.model == "bioelmo":
             if self.hparams.fine_tune_bioelmo:
                 optimizer_bioelmo_1 = optim.Adam(
@@ -735,21 +762,21 @@ class NERTagger(pl.LightningModule):
                 optimizer = optim.Adam(self.parameters(), lr=float(self.hparams.lr))
                 return optimizer
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> torch.utils.data.DataLoader:
         ds_train = NERDataset.from_dirnames(self.hparams.train_dirs)
         dl_train = NERDataLoader(
             ds_train, batch_size=self.hparams.batch_size, shuffle=True
         )
         return dl_train
 
-    def val_dataloader(self):
+    def val_dataloader(self) -> torch.utils.data.DataLoader:
         ds_val = NERDataset.from_dirnames(self.hparams.val_dirs)
         dl_val = NERDataLoader(
             ds_val, batch_size=self.hparams.batch_size, shuffle=False
         )
         return dl_val
 
-    def test_dataloader(self):
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
         ds_test = NERDataset.from_dirnames(self.hparams.test_dirs)
         dl_test = NERDataLoader(
             ds_test, batch_size=self.hparams.batch_size, shuffle=False
