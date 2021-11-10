@@ -27,7 +27,7 @@ import re
 import shlex
 import subprocess
 from logging import DEBUG, INFO, FileHandler, Formatter, StreamHandler, getLogger
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import pytorch_lightning as pl
 import torch
@@ -43,8 +43,8 @@ from transformers import BertConfig, BertForPreTraining, BertTokenizer
 # ### 0-2. Prepare for logging
 
 
-def create_logger(exp_version):
-    log_file = "{}.log".format(exp_version)
+def create_logger(exp_version: str):
+    log_file = f"{exp_version}.log"
 
     # logger
     logger_ = getLogger(exp_version)
@@ -67,7 +67,7 @@ def create_logger(exp_version):
     logger_.addHandler(ch)
 
 
-def get_logger(exp_version):
+def get_logger(exp_version: str):
     return getLogger(exp_version)
 
 
@@ -78,7 +78,7 @@ ID_TO_LABEL = {0: "O", 1: "I-MEDICATION", 2: "B-MEDICATION"}
 LABEL_TO_ID = {v: k for k, v in ID_TO_LABEL.items()}
 
 
-def tag_to_id(tag, ltoi):
+def tag_to_id(tag: str, ltoi: Dict[str, int]) -> torch.Tensor:
     """
     str, dict -> torch.tensor
     input:
@@ -236,268 +236,24 @@ class NERTagger(pl.LightningModule):
         self.ltoi = {v: k for k, v in self.itol.items()}
 
         if self.hparams.model == "bioelmo":
-            # Load Pretrained BioELMo
-            DIR_ELMo = pathlib.Path(str(self.hparams.bioelmo_dir))
-            self.bioelmo = self.load_bioelmo(
-                DIR_ELMo, not self.hparams.fine_tune_bioelmo
-            )
-            self.bioelmo_output_dim = self.bioelmo.get_output_dim()
-
-            # ELMo Padding token (In ELMo token with ID 0 is used for padding)
-            VOCAB_FILE_PATH = DIR_ELMo / "vocab.txt"
-            command = shlex.split(f"head -n 1 {VOCAB_FILE_PATH}")
-            res = subprocess.Popen(command, stdout=subprocess.PIPE)
-            self.bioelmo_pad_token = res.communicate()[0].decode("utf-8").strip()
-
-            # Initialize Intermediate Affine Layer
-            self.hidden_to_tag = nn.Linear(int(self.bioelmo_output_dim), len(self.itol))
+            self.encoder = ElmoEncoder(self.hparams)
 
         elif self.hparams.model == "biobert":
-            # Load Pretrained BioBERT
-            PATH_BioBERT = pathlib.Path(str(self.hparams.biobert_path))
-            self.bertconfig = BertConfig.from_pretrained(self.hparams.bert_model_type)
-            self.bertforpretraining = BertForPreTraining(self.bertconfig)
-            self.bertforpretraining.load_tf_weights(self.bertconfig, PATH_BioBERT)
-            self.biobert = self.bertforpretraining.bert
-            self.tokenizer = BertTokenizer.from_pretrained(self.hparams.bert_model_type)
+            self.encoder = BertEncoder(self.hparams)
 
-            # Freeze BioBERT if fine-tune not desired
-            if not self.hparams.fine_tune_biobert:
-                for n, m in self.biobert.named_parameters():
-                    m.requires_grad = False
+        self.hparams.encoder_hidden_size = int(self.encoder.hidden_size)
 
-            # Initialize Intermediate Affine Layer
-            self.hidden_to_tag = nn.Linear(
-                int(self.bertconfig.hidden_size), len(self.itol)
-            )
-
-        # Initialize CRF
-        TRANSITIONS = conditional_random_field.allowed_transitions(
-            constraint_type="BIO", labels=self.itol
-        )
-        self.crf = conditional_random_field.ConditionalRandomField(
-            # set to 3 because here "tags" means ['O', 'B', 'I']
-            # no need to include 'BOS' and 'EOS' in "tags"
-            num_tags=len(self.itol),
-            constraints=TRANSITIONS,
-            include_start_end_transitions=False,
-        )
-        self.crf.reset_parameters()
-
-    @staticmethod
-    def load_bioelmo(bioelmo_dir: str, freeze: bool) -> Elmo:
-        # Load Pretrained BioELMo
-        DIR_ELMo = pathlib.Path(bioelmo_dir)
-        bioelmo = Elmo(
-            DIR_ELMo / "biomed_elmo_options.json",
-            DIR_ELMo / "biomed_elmo_weights.hdf5",
-            1,
-            requires_grad=bool(not freeze),
-            dropout=0,
-        )
-        return bioelmo
-
-    def get_device(self):
-        return self.crf.state_dict()["transitions"].device
-
-    def _forward_bioelmo(self, tokens) -> Tuple[torch.Tensor, torch.Tensor]:
-        # character_ids: torch.tensor(n_batch, len_max)
-        # documents will be padded to have the same token lengths as the longest document
-        character_ids = batch_to_ids(tokens)
-        character_ids = character_ids[:, : self.hparams.max_length, :]
-        character_ids = character_ids.to(self.get_device())
-
-        # characted_ids -> BioELMo hidden state of the last layer & mask
-        out = self.bioelmo(character_ids)
-        hidden = out["elmo_representations"][-1]
-        crf_mask = out["mask"].to(torch.bool).to(self.get_device())
-
-        return (hidden, crf_mask)
-
-    def _forward_biobert(
-        self, tokens: List[List[str]]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return BioBERT Hidden state for the tokenized documents.
-        Documents with different lengths will be accepted.
-
-        list(list(str)) -> tuple(torch.tensor, torch.tensor)
-        """
-        # Convert each token of each document into a list of subwords.
-        # e.g.,
-        #   [['Admission', 'Date', ...], ['Service', ':', ...]]
-        #       |
-        #       V
-        #   [[['Ad', '##mission'], ['Date'], ...], [['Service'], [':'], ...]]
-        subwords_unchained = [
-            [self.tokenizer.tokenize(tok) for tok in doc] for doc in tokens
-        ]
-
-        # Simply replace each token of each document with corresponding subwords.
-        # e.g.,
-        #   [['Admission', 'Date', ...], ['Service', ':', ...]]
-        #       |
-        #       V
-        #   [['Ad', '##mission', 'Date', ...], ['Service', ':', ...]]
-        subwords = [
-            list(itertools.chain(*[self.tokenizer.tokenize(tok) for tok in doc]))
-            for doc in tokens
-        ]
-
-        # Memorize (i) header place of each token and (ii) how many subwords each token gave birth.
-        # e.g.,
-        #   For document ['Admission', 'Date'] -> ['Ad', '##mission', 'Date'],
-        #   subword_info will be {'start':[0,2], 'length':[2,1]}.
-        subword_info = []
-        for doc in subwords_unchained:
-            word_lengths = [len(word) for word in doc]
-            word_head_ix = [0]
-            for i in range(len(word_lengths) - 1):
-                word_head_ix.append(word_head_ix[-1] + word_lengths[i])
-            assert len(word_lengths) == len(word_head_ix)
-            subword_info.append({"start": word_head_ix, "length": word_lengths})
-
-        assert [len(info["start"]) for info in subword_info] == [
-            len(doc) for doc in tokens
-        ]
-
-        # Split each document into chunks shorter than max_length.
-        # Here, each document will be simply split at every 510 tokens.
-
-        max_length = min(
-            self.bertconfig.max_position_embeddings, self.hparams.max_length
-        )
-
-        longest_length = max([len(doc) for doc in subwords])
-        n_chunks = (longest_length - 1) // (max_length - 2) + 1
-        chunks = []
-        for n in range(n_chunks):
-            chunk_of_all_documents = []
-            for document in subwords:
-                chunk_of_single_document = document[
-                    (max_length - 2) * n : (max_length - 2) * (n + 1)
-                ]
-                if chunk_of_single_document == []:
-                    chunk_of_all_documents.append([""])
-                else:
-                    chunk_of_all_documents.append(chunk_of_single_document)
-            chunks.append(chunk_of_all_documents)
-
-        # Convert chunks into BERT input form.
-        inputs = []
-        for chunk in chunks:
-            if type(chunk) is str:
-                unsqueezed_chunk = [[chunk]]
-            elif type(chunk) is list:
-                if type(chunk[0]) is str:
-                    unsqueezed_chunk = [chunk]
-                elif type(chunk[0]) is list:
-                    unsqueezed_chunk = chunk
-
-            inputs.append(
-                self.tokenizer.batch_encode_plus(
-                    unsqueezed_chunk,
-                    pad_to_max_length=True,
-                    is_pretokenized=True,
-                )
-            )
-
-        # Get BioBERT hidden states.
-        hidden_states = []
-        for inpt in inputs:
-            inpt_tensors = {
-                k: torch.tensor(v).to(self.get_device()) for k, v in inpt.items()
-            }
-            hidden_state = self.biobert(**inpt_tensors)[0][:, 1:-1, :]
-            hidden_states.append(hidden_state)
-
-        # Concatenate hidden states from each chunk.
-        hidden_states_cat = torch.cat(hidden_states, dim=1)
-
-        # If a word was tokenized into multiple subwords, take average of them.
-        # e.g. Hidden state for "Admission" equals average of hidden states for "Ad" and "##mission"
-        hidden_states_shrunk = torch.zeros_like(hidden_states_cat)
-        for n in range(hidden_states_cat.size()[0]):
-            hidden_state_shrunk = torch.stack(
-                [
-                    torch.narrow(hidden_states_cat[n], dim=0, start=s, length=l).mean(
-                        dim=0
-                    )
-                    for s, l in zip(subword_info[n]["start"], subword_info[n]["length"])
-                ]
-            )
-            hidden_states_shrunk[
-                n, : hidden_state_shrunk.size()[0], :
-            ] = hidden_state_shrunk
-
-        # Truncate lengthy tail that will not be used.
-        hidden_states_shrunk = hidden_states_shrunk[
-            :, : max([len(doc) for doc in tokens]), :
-        ]
-
-        # Create mask for CRF.
-        crf_mask = torch.zeros(hidden_states_shrunk.size()[:2]).to(torch.uint8)
-        for i, length in enumerate([len(doc) for doc in tokens]):
-            crf_mask[i, :length] = 1
-        crf_mask = crf_mask > 0
-        crf_mask = crf_mask.to(self.get_device())
-
-        return (hidden_states_shrunk, crf_mask)
-
-    def _forward_crf(
-        self,
-        hidden: torch.Tensor,
-        gold_tags_padded: torch.Tensor,
-        crf_mask: torch.Tensor,
-    ) -> Dict:
-        """
-        input:
-            hidden (torch.tensor) (n_batch, seq_length, hidden_dim)
-            gold_tags_padded (torch.tensor) (n_batch, seq_length)
-            crf_mask (torch.bool) (n_batch, seq_length)
-        output:
-            result (dict)
-                'log_likelihood' : torch.tensor
-                'pred_tags_packed' : torch.nn.utils.rnn.PackedSequence
-                'gold_tags_padded' : torch.tensor
-        """
-        result = {}
-
-        if not (hidden.size()[1] == gold_tags_padded.size()[1] == crf_mask.size()[1]):
-            raise RuntimeError(
-                "seq_length of hidden, gold_tags_padded, and crf_mask do not match: "
-                + f"{hidden.size()}, {gold_tags_padded.size()}, {crf_mask.size()}"
-            )
-
-        if gold_tags_padded is not None:
-            # Training Mode
-            # Log likelihood
-            log_prob = self.crf.forward(hidden, gold_tags_padded, crf_mask)
-
-            # top k=1 tagging
-            Y = [
-                torch.tensor(result[0])
-                for result in self.crf.viterbi_tags(logits=hidden, mask=crf_mask)
-            ]
-            Y = rnn.pack_sequence(Y, enforce_sorted=False)
-
-            result["log_likelihood"] = log_prob
-            result["pred_tags_packed"] = Y
-            result["gold_tags_padded"] = gold_tags_padded
-            return result
-
+        if self.hparams.use_crf:
+            self.tagger = CrfTagger(self.hparams)
         else:
-            # Prediction Mode
-            # top k=1 tagging
-            Y = [
-                torch.tensor(result[0])
-                for result in self.crf.viterbi_tags(logits=hidden, mask=crf_mask)
-            ]
-            Y = rnn.pack_sequence(Y, enforce_sorted=False)
-            result["pred_tags_packed"] = Y
-            return result
+            self.tagger = VanillaTagger(self.hparams)
 
-    def forward(self, tokens, gold_tags=None):
+    def get_device(self) -> torch.device:
+        return list(self.state_dict().values())[0].device
+
+    def forward(
+        self, tokens: List[List[str]], gold_tags: Optional[List[List[int]]] = None
+    ):
         """
         Main NER tagging function.
         Documents with different token lengths are accepted.
@@ -511,18 +267,8 @@ class NERTagger(pl.LightningModule):
                 'pred_tags_packed' : torch.nn.utils.rnn.PackedSequence
                 'gold_tags_padded' : torch.tensor
         """
-        if self.hparams.model == "bioelmo":
-            # BioELMo features
-            hidden, crf_mask = self._forward_bioelmo(tokens)
-
-        elif self.hparams.model == "biobert":
-            # BioELMo features
-            hidden, crf_mask = self._forward_biobert(tokens)
-
-        # Turn on gradient tracking
-        # Affine transformation (Hidden_dim -> N_tag)
-        hidden.requires_grad_()
-        hidden = self.hidden_to_tag(hidden)
+        # BioELMo/BioBERT features
+        hidden, crf_mask = self.encoder(tokens)
 
         if gold_tags is not None:
             gold_tags = [torch.tensor(seq) for seq in gold_tags]
@@ -534,7 +280,7 @@ class NERTagger(pl.LightningModule):
         else:
             gold_tags_padded = None
 
-        result = self._forward_crf(hidden, gold_tags_padded, crf_mask)
+        result = self.tagger(hidden, gold_tags_padded, crf_mask)
         return result
 
     def recognize_named_entity(self, token, gold_tags=None):
@@ -732,32 +478,26 @@ class NERTagger(pl.LightningModule):
     ) -> Union[torch.optim.Optimizer, List[torch.optim.Optimizer]]:
         if self.hparams.model == "bioelmo":
             if self.hparams.fine_tune_bioelmo:
-                optimizer_bioelmo_1 = optim.Adam(
-                    self.bioelmo.parameters(), lr=float(self.hparams.lr_bioelmo)
+                optimizer_bioelmo = optim.Adam(
+                    self.encoder.parameters(), lr=float(self.hparams.lr_bioelmo)
                 )
-                optimizer_bioelmo_2 = optim.Adam(
-                    self.hidden_to_tag.parameters(), lr=float(self.hparams.lr_bioelmo)
+                optimizer_tagger = optim.Adam(
+                    self.tagger.parameters(), lr=float(self.hparams.lr)
                 )
-                optimizer_crf = optim.Adam(
-                    self.crf.parameters(), lr=float(self.hparams.lr)
-                )
-                return [optimizer_bioelmo_1, optimizer_bioelmo_2, optimizer_crf]
+                return [optimizer_bioelmo, optimizer_tagger]
             else:
                 optimizer = optim.Adam(self.parameters(), lr=float(self.hparams.lr))
                 return optimizer
 
         elif self.hparams.model == "biobert":
             if self.hparams.fine_tune_biobert:
-                optimizer_biobert_1 = optim.Adam(
-                    self.biobert.parameters(), lr=float(self.hparams.lr_biobert)
+                optimizer_biobert = optim.Adam(
+                    self.encoder.parameters(), lr=float(self.hparams.lr_biobert)
                 )
-                optimizer_biobert_2 = optim.Adam(
-                    self.hidden_to_tag.parameters(), lr=float(self.hparams.lr_biobert)
+                optimizer_tagger = optim.Adam(
+                    self.tagger.parameters(), lr=float(self.hparams.lr)
                 )
-                optimizer_crf = optim.Adam(
-                    self.crf.parameters(), lr=float(self.hparams.lr)
-                )
-                return [optimizer_biobert_1, optimizer_biobert_2, optimizer_crf]
+                return [optimizer_biobert, optimizer_tagger]
             else:
                 optimizer = optim.Adam(self.parameters(), lr=float(self.hparams.lr))
                 return optimizer
@@ -782,6 +522,406 @@ class NERTagger(pl.LightningModule):
             ds_test, batch_size=self.hparams.batch_size, shuffle=False
         )
         return dl_test
+
+
+class TextEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def get_device(self) -> torch.device:
+        return list(self.state_dict().values())[0].device
+
+
+class ElmoEncoder(TextEncoder):
+    def __init__(self, hparams):
+        """
+        input:
+            hparams: namespace with the following items:
+                'data_dir' (str): Data Directory. default: './official/ebm_nlp_1_00'
+                'bioelmo_dir' (str): BioELMo Directory. default: './models/bioelmo', help='BioELMo Directory')
+                'max_length' (int): Max Length. default: 1024
+                'lr' (float): Learning Rate. default: 1e-2
+                'fine_tune_bioelmo' (bool): Whether to Fine Tune BioELMo. default: False
+                'lr_bioelmo' (float): Learning Rate in BioELMo Fine-tuning. default: 1e-4
+        """
+        super().__init__()
+        self.hparams = hparams
+
+        # Load Pretrained BioELMo
+        DIR_ELMo = pathlib.Path(str(self.hparams.bioelmo_dir))
+        self.bioelmo = self.load_bioelmo(DIR_ELMo, not self.hparams.fine_tune_bioelmo)
+        self.hidden_size = self.bioelmo.get_output_dim()
+
+        # ELMo Padding token (In ELMo token with ID 0 is used for padding)
+        VOCAB_FILE_PATH = DIR_ELMo / "vocab.txt"
+        command = shlex.split(f"head -n 1 {VOCAB_FILE_PATH}")
+        res = subprocess.Popen(command, stdout=subprocess.PIPE)
+        self.bioelmo_pad_token = res.communicate()[0].decode("utf-8").strip()
+
+    @staticmethod
+    def load_bioelmo(bioelmo_dir: str, freeze: bool) -> Elmo:
+        # Load Pretrained BioELMo
+        DIR_ELMo = pathlib.Path(bioelmo_dir)
+        bioelmo = Elmo(
+            DIR_ELMo / "biomed_elmo_options.json",
+            DIR_ELMo / "biomed_elmo_weights.hdf5",
+            1,
+            requires_grad=bool(not freeze),
+            dropout=0,
+        )
+        return bioelmo
+
+    def forward(self, tokens: List[List[str]]) -> Tuple[torch.Tensor, torch.Tensor]:
+        # character_ids: torch.tensor(n_batch, len_max)
+        # documents will be padded to have the same token lengths as the longest document
+        character_ids = batch_to_ids(tokens)
+        character_ids = character_ids[:, : self.hparams.max_length, :]
+        character_ids = character_ids.to(self.get_device())
+
+        # characted_ids -> BioELMo hidden state of the last layer & mask
+        out = self.bioelmo(character_ids)
+        hidden = out["elmo_representations"][-1]
+        crf_mask = out["mask"].to(torch.bool).to(self.get_device())
+
+        return (hidden, crf_mask)
+
+
+class BertEncoder(TextEncoder):
+    def __init__(self, hparams):
+        """
+        input:
+            hparams: namespace with the following items:
+                'data_dir' (str): Data Directory. default: './official/ebm_nlp_1_00'
+                'bioelmo_dir' (str): BioELMo Directory. default: './models/bioelmo', help='BioELMo Directory')
+                'max_length' (int): Max Length. default: 1024
+                'lr' (float): Learning Rate. default: 1e-2
+                'fine_tune_bioelmo' (bool): Whether to Fine Tune BioELMo. default: False
+                'lr_bioelmo' (float): Learning Rate in BioELMo Fine-tuning. default: 1e-4
+        """
+        super().__init__()
+        self.hparams = hparams
+
+        # Load Pretrained BioBERT
+        PATH_BioBERT = pathlib.Path(str(self.hparams.biobert_path))
+        self.bertconfig = BertConfig.from_pretrained(self.hparams.bert_model_type)
+        self.bertforpretraining = BertForPreTraining(self.bertconfig)
+        self.bertforpretraining.load_tf_weights(self.bertconfig, PATH_BioBERT)
+        self.biobert = self.bertforpretraining.bert
+        self.tokenizer = BertTokenizer.from_pretrained(self.hparams.bert_model_type)
+        self.hidden_size = self.bertconfig.hidden_size
+
+        # Freeze BioBERT if fine-tune not desired
+        if not self.hparams.fine_tune_biobert:
+            for n, m in self.biobert.named_parameters():
+                m.requires_grad = False
+
+    def forward(self, tokens: List[List[str]]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return BioBERT Hidden state for the tokenized documents.
+        Documents with different lengths will be accepted.
+
+        list(list(str)) -> tuple(torch.tensor, torch.tensor)
+        """
+        # Convert each token of each document into a list of subwords.
+        # e.g.,
+        #   [['Admission', 'Date', ...], ['Service', ':', ...]]
+        #       |
+        #       V
+        #   [[['Ad', '##mission'], ['Date'], ...], [['Service'], [':'], ...]]
+        subwords_unchained = [
+            [self.tokenizer.tokenize(tok) for tok in doc] for doc in tokens
+        ]
+
+        # Simply replace each token of each document with corresponding subwords.
+        # e.g.,
+        #   [['Admission', 'Date', ...], ['Service', ':', ...]]
+        #       |
+        #       V
+        #   [['Ad', '##mission', 'Date', ...], ['Service', ':', ...]]
+        subwords = [
+            list(itertools.chain(*[self.tokenizer.tokenize(tok) for tok in doc]))
+            for doc in tokens
+        ]
+
+        # Memorize (i) header place of each token and (ii) how many subwords each token gave birth.
+        # e.g.,
+        #   For document ['Admission', 'Date'] -> ['Ad', '##mission', 'Date'],
+        #   subword_info will be {'start':[0,2], 'length':[2,1]}.
+        subword_info = []
+        for doc in subwords_unchained:
+            word_lengths = [len(word) for word in doc]
+            word_head_ix = [0]
+            for i in range(len(word_lengths) - 1):
+                word_head_ix.append(word_head_ix[-1] + word_lengths[i])
+            assert len(word_lengths) == len(word_head_ix)
+            subword_info.append({"start": word_head_ix, "length": word_lengths})
+
+        assert [len(info["start"]) for info in subword_info] == [
+            len(doc) for doc in tokens
+        ]
+
+        # Split each document into chunks shorter than max_length.
+        # Here, each document will be simply split at every 510 tokens.
+
+        max_length = min(
+            self.bertconfig.max_position_embeddings, self.hparams.max_length
+        )
+
+        longest_length = max([len(doc) for doc in subwords])
+        n_chunks = (longest_length - 1) // (max_length - 2) + 1
+        chunks = []
+        for n in range(n_chunks):
+            chunk_of_all_documents = []
+            for document in subwords:
+                chunk_of_single_document = document[
+                    (max_length - 2) * n : (max_length - 2) * (n + 1)
+                ]
+                if chunk_of_single_document == []:
+                    chunk_of_all_documents.append([""])
+                else:
+                    chunk_of_all_documents.append(chunk_of_single_document)
+            chunks.append(chunk_of_all_documents)
+
+        # Convert chunks into BERT input form.
+        inputs = []
+        for chunk in chunks:
+            if type(chunk) is str:
+                unsqueezed_chunk = [[chunk]]
+            elif type(chunk) is list:
+                if type(chunk[0]) is str:
+                    unsqueezed_chunk = [chunk]
+                elif type(chunk[0]) is list:
+                    unsqueezed_chunk = chunk
+
+            inputs.append(
+                self.tokenizer.batch_encode_plus(
+                    unsqueezed_chunk,
+                    pad_to_max_length=True,
+                    is_pretokenized=True,
+                )
+            )
+
+        # Get BioBERT hidden states.
+        hidden_states = []
+        for inpt in inputs:
+            inpt_tensors = {
+                k: torch.tensor(v).to(self.get_device()) for k, v in inpt.items()
+            }
+            hidden_state = self.biobert(**inpt_tensors)[0][:, 1:-1, :]
+            hidden_states.append(hidden_state)
+
+        # Concatenate hidden states from each chunk.
+        hidden_states_cat = torch.cat(hidden_states, dim=1)
+
+        # If a word was tokenized into multiple subwords, take average of them.
+        # e.g. Hidden state for "Admission" equals average of hidden states for "Ad" and "##mission"
+        hidden_states_shrunk = torch.zeros_like(hidden_states_cat)
+        for n in range(hidden_states_cat.size()[0]):
+            hidden_state_shrunk = torch.stack(
+                [
+                    torch.narrow(hidden_states_cat[n], dim=0, start=s, length=l).mean(
+                        dim=0
+                    )
+                    for s, l in zip(subword_info[n]["start"], subword_info[n]["length"])
+                ]
+            )
+            hidden_states_shrunk[
+                n, : hidden_state_shrunk.size()[0], :
+            ] = hidden_state_shrunk
+
+        # Truncate lengthy tail that will not be used.
+        hidden_states_shrunk = hidden_states_shrunk[
+            :, : max([len(doc) for doc in tokens]), :
+        ]
+
+        # Create mask for CRF.
+        crf_mask = torch.zeros(hidden_states_shrunk.size()[:2]).to(torch.uint8)
+        for i, length in enumerate([len(doc) for doc in tokens]):
+            crf_mask[i, :length] = 1
+        crf_mask = crf_mask > 0
+        crf_mask = crf_mask.to(self.get_device())
+
+        return (hidden_states_shrunk, crf_mask)
+
+
+class CrfTagger(TextEncoder):
+    def __init__(self, hparams):
+        """
+        input:
+            hparams: namespace with the following items:
+                'data_dir' (str): Data Directory. default: './official/ebm_nlp_1_00'
+                'bioelmo_dir' (str): BioELMo Directory. default: './models/bioelmo', help='BioELMo Directory')
+                'max_length' (int): Max Length. default: 1024
+                'lr' (float): Learning Rate. default: 1e-2
+                'fine_tune_bioelmo' (bool): Whether to Fine Tune BioELMo. default: False
+                'lr_bioelmo' (float): Learning Rate in BioELMo Fine-tuning. default: 1e-4
+        """
+        super().__init__()
+        self.hparams = hparams
+        self.itol = ID_TO_LABEL
+        self.ltoi = {v: k for k, v in self.itol.items()}
+
+        # Initialize Intermediate Affine Layer
+        self.hidden_to_tag = nn.Linear(self.hparams.encoder_hidden_size, len(self.itol))
+
+        # Initialize CRF
+        TRANSITIONS = conditional_random_field.allowed_transitions(
+            constraint_type="BIO", labels=self.itol
+        )
+
+        self.crf = conditional_random_field.ConditionalRandomField(
+            # set to 3 because here "tags" means ['O', 'B', 'I']
+            # no need to include 'BOS' and 'EOS' in "tags"
+            num_tags=len(self.itol),
+            constraints=TRANSITIONS,
+            include_start_end_transitions=False,
+        )
+        self.crf.reset_parameters()
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        gold_tags_padded: Optional[torch.Tensor],
+        crf_mask: torch.Tensor,
+    ) -> Dict:
+        """
+        input:
+            hidden (torch.tensor) (n_batch, seq_length, hidden_dim)
+            gold_tags_padded (torch.tensor) (n_batch, seq_length)
+            crf_mask (torch.bool) (n_batch, seq_length)
+        output:
+            result (dict)
+                'log_likelihood' : torch.tensor
+                'pred_tags_packed' : torch.nn.utils.rnn.PackedSequence
+                'gold_tags_padded' : torch.tensor
+        """
+        result = {}
+
+        # Turn on gradient tracking
+        # Affine transformation (Hidden_dim -> N_tag)
+        hidden.requires_grad_()
+        hidden = self.hidden_to_tag(hidden)
+        hidden = hidden[:, : self.hparams.max_length, :]
+        gold_tags_padded = gold_tags_padded[:, : self.hparams.max_length]
+        crf_mask = crf_mask[:, : self.hparams.max_length]
+
+        if not (hidden.size()[1] == gold_tags_padded.size()[1] == crf_mask.size()[1]):
+            raise RuntimeError(
+                "seq_length of hidden, gold_tags_padded, and crf_mask do not match: "
+                + f"{hidden.size()}, {gold_tags_padded.size()}, {crf_mask.size()}"
+            )
+
+        if gold_tags_padded is not None:
+            # Training Mode
+            # Log-likelihood of the gold sequence
+            # Sum up the log-likelihood for all unmasked tokens in a minibatch
+            # Therefore "log_prob" will be torch.tensor and a scalar at the same time
+            sum_log_prob = self.crf.forward(hidden, gold_tags_padded, crf_mask)
+            result["log_likelihood"] = sum_log_prob
+            result["gold_tags_padded"] = gold_tags_padded
+
+        # top k=1 tagging
+        Y = [
+            torch.tensor(result[0])
+            for result in self.crf.viterbi_tags(logits=hidden, mask=crf_mask)
+        ]
+        Y = rnn.pack_sequence(Y, enforce_sorted=False)
+
+        result["pred_tags_packed"] = Y
+        return result
+
+
+class VanillaTagger(TextEncoder):
+    def __init__(self, hparams):
+        """
+        input:
+            hparams: namespace with the following items:
+                'data_dir' (str): Data Directory. default: './official/ebm_nlp_1_00'
+                'bioelmo_dir' (str): BioELMo Directory. default: './models/bioelmo', help='BioELMo Directory')
+                'max_length' (int): Max Length. default: 1024
+                'lr' (float): Learning Rate. default: 1e-2
+                'fine_tune_bioelmo' (bool): Whether to Fine Tune BioELMo. default: False
+                'lr_bioelmo' (float): Learning Rate in BioELMo Fine-tuning. default: 1e-4
+        """
+        super().__init__()
+        self.hparams = hparams
+        self.itol = ID_TO_LABEL
+        self.ltoi = {v: k for k, v in self.itol.items()}
+
+        # Initialize Intermediate Affine Layer
+        self.hidden_to_tag = nn.Linear(self.hparams.encoder_hidden_size, len(self.itol))
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        gold_tags_padded: Optional[torch.Tensor],
+        crf_mask: torch.Tensor,
+    ) -> Dict:
+        """
+        input:
+            hidden (torch.tensor) (n_batch, seq_length, hidden_dim)
+            gold_tags_padded (torch.tensor) (n_batch, seq_length)
+            crf_mask (torch.bool) (n_batch, seq_length)
+        output:
+            result (dict)
+                'log_likelihood' : torch.tensor
+                'pred_tags_packed' : torch.nn.utils.rnn.PackedSequence
+                'gold_tags_padded' : torch.tensor
+        """
+        result = {}
+
+        # Turn on gradient tracking
+        # Affine transformation:
+        # (n_batch, seq_length, hidden_dim)
+        # -> (n_batch, seq_length, N_tag)
+        hidden.requires_grad_()
+        hidden = self.hidden_to_tag(hidden)
+
+        hidden = hidden[:, : self.hparams.max_length, :]
+        gold_tags_padded = gold_tags_padded[:, : self.hparams.max_length]
+        crf_mask = crf_mask[:, : self.hparams.max_length]
+
+        if not (hidden.size()[1] == gold_tags_padded.size()[1] == crf_mask.size()[1]):
+            raise RuntimeError(
+                "seq_length of hidden, gold_tags_padded, and crf_mask do not match: "
+                + f"{hidden.size()}, {gold_tags_padded.size()}, {crf_mask.size()}"
+            )
+
+        if gold_tags_padded is not None:
+            # Training Mode
+            # Compute log-likelihood for gold sequence
+            # (n_batch, seq_length, N_tag) -> (n_batch, seq_length, N_tag)
+            loss = torch.nn.NLLLoss(reduction="none")
+
+            # All tokens, all tags
+            log_prob = torch.nn.functional.log_softmax(hidden, dim=2)
+            # For gold tags only
+            gold_log_prob = torch.stack(
+                [
+                    loss(log_prob[i, :, :], gold_tags_padded[i, :])
+                    for i in range(log_prob.size()[0])
+                ],
+                dim=0,
+            )
+
+            # For unmasked tokens only
+            unmasked_gold_log_prob = gold_log_prob * crf_mask
+
+            # Take sum & convert to negative value
+            sum_log_prob = unmasked_gold_log_prob.sum() * -1
+
+            result["log_likelihood"] = sum_log_prob
+            result["gold_tags_padded"] = gold_tags_padded
+
+        # top k=1 tagging
+        argmaxs = log_prob.argmax(dim=2)
+        Y = []
+        for i in range(log_prob.size()[0]):
+            Y.append(argmaxs[i][crf_mask[i]])
+        Y = rnn.pack_sequence(Y, enforce_sorted=False)
+
+        result["pred_tags_packed"] = Y
+        return result
 
 
 def span_classification_report(T, Y, digits=4):

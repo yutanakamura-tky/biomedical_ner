@@ -152,6 +152,7 @@ def get_args():
         default="./models/biobert/biobert_v1.1_pubmed",
         help="BioBERT Directory",
     )
+    parser.add_argument("--use-crf", dest="use_crf", action="store_true")
     parser.add_argument(
         "-v", "--version", dest="version", type=str, help="Experiment Name"
     )
